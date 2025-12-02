@@ -6,3 +6,6 @@
 
 models/
 yolopv2_Nx3x480x640.onnx
+
+input.mp4
+demo_result.mp4

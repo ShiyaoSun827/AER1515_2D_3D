@@ -1,48 +1,64 @@
+# server.py
 import cv2
-from main import YOLOPv2
+import numpy as np
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import base64
+from main import YOLOPv2   # 引用修改后的 main.py
 
-# 1. 配置路径
-model_path = "yolopv2_Nx3x480x640.onnx"   # 你的模型
-input_video_path = "input.mp4"            # 下载好的原始视频
-output_video_path = "output_yolop.mp4"    # 输出视频名
+app = FastAPI()
 
-# 2. 初始化模型（用 OpenCV dnn 版 YOLOPv2）
-yolop = YOLOPv2(model_path, confThreshold=0.5)
+# 允许 RN 客户端访问
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],   # 开发阶段先放开
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# 3. 打开输入视频
-cap = cv2.VideoCapture(input_video_path)
-if not cap.isOpened():
-    raise RuntimeError(f"无法打开视频: {input_video_path}")
+# 初始化模型
+# 请确保 onnx 模型路径正确
+model = YOLOPv2("onnx/yolopv2_Nx3x480x640.onnx", confThreshold=0.5)
 
-# 读出原视频的宽、高、FPS，用来创建输出视频
-fps = cap.get(cv2.CAP_PROP_FPS) or 25
-width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+class ImageRequest(BaseModel):
+    image_base64: str          # 图片数据
+    cam_height: float = 1.3    # [新增] 相机离地高度，默认 1.3米
+    pitch: float = 0.0         # [新增] 相机俯仰角(弧度)，默认 0
+    fov_v: float = 55.0        # [新增] 垂直视场角，默认 55度
 
-fourcc = cv2.VideoWriter_fourcc(*"mp4v")   # 或者 "avc1"
-out = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
+class ImageResponse(BaseModel):
+    image_base64: str          # 处理后的图片
 
-frame_idx = 0
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
+@app.post("/infer", response_model=ImageResponse)
+def infer(req: ImageRequest):
+    # 1. base64 -> OpenCV 图像
+    try:
+        img_data = base64.b64decode(req.image_base64)
+        nparr = np.frombuffer(img_data, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    except Exception as e:
+        return {"error": "Invalid image data"}
 
-    # 4. YOLOPv2 推理 + 画框/车道线/可通行区域
-    result = yolop.detect(frame)   # detect 会返回画好东西的 frame
+    # 2. 构造几何配置参数
+    camera_cfg = {
+        'cam_height': req.cam_height,
+        'pitch': req.pitch,
+        'fov_v': req.fov_v
+    }
 
-    # 5. 写入输出视频
-    out.write(result)
+    # 3. YOLOPv2 推理 (传入 camera_cfg 以启用测距)
+    # detect 函数会返回绘制了检测框、车道线、可行驶区域以及距离数值的图像
+    out = model.detect(img, camera_cfg=camera_cfg)
 
-    # （可选）实时看看效果
-    cv2.imshow("YOLOPv2 Video", result)
-    if cv2.waitKey(1) & 0xFF == 27:  # 按 ESC 提前退出
-        break
+    # 4. 编码回 JPEG + base64 返回给前端
+    _, buf = cv2.imencode(".jpg", out)
+    out_b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
+    
+    return ImageResponse(image_base64=out_b64)
 
-    frame_idx += 1
-
-cap.release()
-out.release()
-cv2.destroyAllWindows()
-
-print(f"处理完成，共 {frame_idx} 帧，输出保存到: {output_video_path}")
+if __name__ == "__main__":
+    import uvicorn
+    # 启动服务：host="0.0.0.0" 允许局域网访问
+    uvicorn.run(app, host="0.0.0.0", port=8000)
