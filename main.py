@@ -16,7 +16,23 @@ class YOLOPv2():
         self.num_class = len(self.classes)
         so = ort.SessionOptions()
         so.log_severity_level = 3
-        self.session = ort.InferenceSession(model_path, so)
+
+        #self.session = ort.InferenceSession(model_path, so)
+        # --- [修改开始] 指定加速提供者 ---
+        # 优先使用 CoreML (GPU/NPU)，如果不可用则回退到 CPU
+        providers = ['CoreMLExecutionProvider', 'CPUExecutionProvider']
+        
+        try:
+            self.session = ort.InferenceSession(model_path, sess_options=so, providers=providers)
+        except Exception as e:
+            print(f"Warning: CoreML acceleration failed, falling back to CPU. Error: {e}")
+            self.session = ort.InferenceSession(model_path, sess_options=so, providers=['CPUExecutionProvider'])
+        # --- [修改结束] ---
+
+        # 打印当前使用的硬件加速器，用于验证
+        print(f"当前推理设备: {self.session.get_providers()}")
+
+
         model_inputs = self.session.get_inputs()
         self.input_name = model_inputs[0].name
         self.input_names = [model_inputs[i].name for i in range(len(model_inputs))]
